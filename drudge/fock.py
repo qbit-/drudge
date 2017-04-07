@@ -6,9 +6,10 @@ and annihilation operators acting on fermion or boson Fock spaces.
 """
 
 import functools
-import typing
 import warnings
 
+import typing
+from pyspark import RDD
 from sympy import (
     KroneckerDelta, IndexedBase, Expr, Symbol, Rational, symbols, conjugate
 )
@@ -16,7 +17,7 @@ from sympy import (
 from ._tceparser import parse_tce_out
 from .canon import NEG, IDENT
 from .canonpy import Perm
-from .drudge import Tensor
+from .drudge import Tensor, TensorDef
 from .term import Vec, Range, try_resolve_range, Term
 from .utils import sympy_key, ensure_expr, EnumSymbs
 from .wick import WickDrudge
@@ -183,6 +184,16 @@ class FockDrudge(WickDrudge):
         return Tensor(
             self, self.normal_order(tensor.terms, comparator=None)
         )
+
+    def normal_order(self, terms: RDD, **kwargs):
+        """Normal order the field operators.
+
+        Here the normal-ordering operation of general Wick drudge will be
+        invoked twice to ensure full simplification.
+        """
+
+        step1 = super().normal_order(terms, **kwargs)
+        return super().normal_order(step1, **kwargs)
 
     @staticmethod
     def dagger(tensor: Tensor, real=False):
@@ -507,7 +518,12 @@ class GenMBDrudge(FockDrudge):
 
     .. attribute::  spin_vals
 
-        A list of all the explicit spin values.
+        A list of all the explicit spin values.  None if spin values are not
+        given.
+
+    .. attribute:: spin_range
+
+        The symbolic range for spin values.  None if it is not given.
 
     .. attribute:: orig_ham
 
@@ -544,7 +560,10 @@ class GenMBDrudge(FockDrudge):
             names archive by :py:meth:`Drudge.set_dumms`.
 
         spin
-            The values for the explicit spin quantum number.
+            The explicit spin quantum number.  It can be an empty sequence to
+            disable explicit spin.  Or it can be a sequence of SymPy expressions
+            to give explicit spin values, or a range and dummies pair for
+            symbolic spin.
 
         one_body
             The indexed base for the amplitude in the one-body part of the
@@ -589,18 +608,42 @@ class GenMBDrudge(FockDrudge):
             orb_ranges.append(range_)
             continue
         self.orb_ranges = orb_ranges
-        self.add_resolver_for_dumms()
 
-        spin_vals = []
-        for i in spin:
-            spin_vals.append(ensure_expr(i))
-        has_spin = len(spin_vals) > 0
-        if len(spin_vals) == 1:
-            warnings.warn(
-                'Just one spin value is given: '
-                'consider dropping it for better performance'
-            )
-        self.spin_vals = spin_vals
+        spin = list(spin)
+        if len(spin) == 0:
+            has_spin = False
+            spin_range = None
+
+            self.spin_vals = None
+            self.spin_range = None
+
+        elif isinstance(spin[0], Range):
+            has_spin = True
+            if len(spin) != 2:
+                raise ValueError(
+                    'Invalid spin specification', spin,
+                    'expecting range/dummies pair.'
+                )
+            self.set_dumms(spin[0], spin[1])
+            spin_range = spin[0]
+
+            self.spin_vals = None
+            self.spin_range = spin_range
+
+        else:
+            has_spin = True
+            spin_vals = [ensure_expr(i) for i in spin]
+            if len(spin_vals) == 1:
+                warnings.warn(
+                    'Just one spin value is given: '
+                    'consider dropping it for better performance'
+                )
+            spin_range = spin_vals
+
+            self.spin_vals = spin_vals
+            self.spin_range = None
+
+        self.add_resolver_for_dumms()
 
         # These dummies are used temporarily and will soon be reset.  They are
         # here, rather than the given dummies directly, because we might need to
@@ -615,17 +658,11 @@ class GenMBDrudge(FockDrudge):
         )
         spin_dumms = tuple(
             Symbol('internalSpinPlaceholder{}'.format(i))
-            for i in range(4)
+            for i in range(2)
         )
 
         orb_sums = [(i, orb_ranges) for i in orb_dumms]
-        spin_sums = [(i, spin_vals) for i in spin_dumms]
-
-        # The indices to get the operators in the hamiltonian.
-        indices = [
-            (i, j) if has_spin else i
-            for i, j in zip(orb_dumms, spin_dumms)
-        ]
+        spin_sums = [(i, spin_range) for i in spin_dumms]
 
         # Actual Hamiltonian building.
 
@@ -634,12 +671,18 @@ class GenMBDrudge(FockDrudge):
 
         one_body_sums = orb_sums[:2]
         if has_spin:
-            one_body_sums.extend(spin_sums[:2])
+            one_body_sums.append(spin_sums[0])
+
+        if has_spin:
+            one_body_ops = (
+                cr[orb_dumms[0], spin_dumms[0]] *
+                an[orb_dumms[1], spin_dumms[0]]
+            )
+        else:
+            one_body_ops = cr[orb_dumms[0]] * an[orb_dumms[1]]
 
         one_body_ham = self.sum(
-            *one_body_sums,
-            one_body[orb_dumms[:2]] * cr[indices[0]] * an[indices[1]],
-            predicate=conserve_spin(*spin_dumms[:2]) if has_spin else None
+            *one_body_sums, one_body[orb_dumms[:2]] * one_body_ops
         )
 
         if dbbar:
@@ -652,13 +695,23 @@ class GenMBDrudge(FockDrudge):
 
         two_body_sums = orb_sums
         if has_spin:
-            two_body_sums.extend(spin_sums)
+            two_body_sums.extend(spin_sums[:2])
+
+        if has_spin:
+            two_body_ops = (
+                cr[orb_dumms[0], spin_dumms[0]] *
+                cr[orb_dumms[1], spin_dumms[1]] *
+                an[orb_dumms[3], spin_dumms[1]] *
+                an[orb_dumms[2], spin_dumms[0]]
+            )
+        else:
+            two_body_ops = (
+                cr[orb_dumms[0]] * cr[orb_dumms[1]] *
+                an[orb_dumms[3]] * an[orb_dumms[2]]
+            )
 
         two_body_ham = self.sum(
-            *two_body_sums,
-            two_body_coeff * two_body[orb_dumms] *
-            cr[indices[0]] * cr[indices[1]] * an[indices[3]] * an[indices[2]],
-            predicate=conserve_spin(*spin_dumms) if has_spin else None
+            *two_body_sums, two_body_coeff * two_body[orb_dumms] * two_body_ops
         )
 
         # We need to at lease remove the internal symbols.
@@ -870,27 +923,81 @@ class SpinOneHalfPartHoleDrudge(PartHoleDrudge):
     """Drudge for the particle-hole problems with explicit one-half spin.
 
     This is a shallow subclass over the general particle-hole drudge without
-    explicit spin.  The spin values are given explicitly to be :py:data:`UP` and
-    :py:data:`DOWN` and the double-bar of the two-body interaction is disabled.
-    And some additional dummies traditional in the field are also added.
+    explicit spin.  The spin values are given explicitly, which are set to
+    :py:data:`UP` and :py:data:`DOWN` by default.  And the double-bar of the
+    two-body interaction is disabled.  And some additional dummies traditional
+    in the field are also added.
 
     """
 
     def __init__(
             self, *args,
             part_orb=(
-                Range('V', 0, Symbol('nv')),
-                PartHoleDrudge.DEFAULT_PART_DUMMS + symbols('beta gamma')
+                    Range('V', 0, Symbol('nv')),
+                    PartHoleDrudge.DEFAULT_PART_DUMMS + symbols('beta gamma')
             ),
             hole_orb=(
-                Range('O', 0, Symbol('no')),
-                PartHoleDrudge.DEFAULT_HOLE_DUMMS + symbols('u v')
-            ),
+                    Range('O', 0, Symbol('no')),
+                    PartHoleDrudge.DEFAULT_HOLE_DUMMS + symbols('u v')
+            ), spin=(UP, DOWN),
             **kwargs
     ):
         """Initialize the particle-hole drudge."""
 
         super().__init__(
-            *args, spin=[UP, DOWN], dbbar=False,
+            *args, spin=spin, dbbar=False,
             part_orb=part_orb, hole_orb=hole_orb, **kwargs
         )
+
+
+class RestrictedPartHoleDrudge(SpinOneHalfPartHoleDrudge):
+    """Drudge for the particle-hole problems on restricted reference.
+
+    Similar to :py:class:`SpinOneHalfPartHoldDrudge`, this drudge deals with
+    particle-hole problems with explicit one-half spin.  However, here the spin
+    quantum number is summed symbolically.  This gives **much** faster
+    derivations for theories based on restricted reference, but offers less
+    flexibility.
+
+    .. attribute:: spin_range
+
+        The symbolic range for spin values.
+
+    .. attribute:: spin_dumms
+
+        The dummies for the spin quantum number.
+
+    .. attribute:: e_
+
+        Tensor definition for the unitary group generators.  It should be
+        indexed with the upper and lower indices to the :math:`E` operator.  It
+        is also registered in the name archive as ``e_``.
+
+    """
+
+    def __init__(
+            self, *args,
+            spin_range=Range(r'\uparrow\downarrow', 0, 2),
+            spin_dumms=tuple(Symbol('sigma{}'.format(i)) for i in range(50)),
+            **kwargs
+    ):
+        """Initialize the restricted particle-hole drudge."""
+
+        super().__init__(
+            *args, spin=(spin_range, spin_dumms), **kwargs
+        )
+        self.add_resolver({
+            UP: spin_range,
+            DOWN: spin_range
+        })
+
+        self.spin_range = spin_range
+        self.spin_dumms = self.dumms.value[spin_range]
+
+        sigma = self.dumms.value[spin_range][0]
+        p = Symbol('p')
+        q = Symbol('q')
+        self.e_ = TensorDef(Vec('E'), (p, q), self.sum(
+            (sigma, spin_range), self.cr[p, sigma] * self.an[q, sigma]
+        ))
+        self.set_name(e_=self.e_)

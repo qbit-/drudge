@@ -290,6 +290,17 @@ def test_tensor_math_ops(free_alg):
     assert comm_v1w1.simplify() == expected.simplify()
 
 
+def test_tensors_can_be_simplified_sums(free_alg):
+    """Test the summation simplification facility of tensors."""
+    dr = free_alg
+    r = Range('D', 0, 2)
+
+    a, b = symbols('a b')
+    tensor = dr.sum(1) + dr.sum((a, r), 1) + dr.sum((a, r), (b, r), 1)
+    res = tensor.simplify()
+    assert res == dr.sum(7)
+
+
 def test_tensors_can_be_differentiated(free_alg):
     """Test the analytic gradient computation of tensors."""
 
@@ -316,7 +327,7 @@ def test_tensors_can_be_differentiated(free_alg):
     res, res_conj = [
         tensor.diff(b[m, n], wirtinger_conj=conj)
         for conj in [False, True]
-        ]
+    ]
 
     expected = dr.einst(
         conjugate(b[i, j]) * a[m, n, i, j]
@@ -413,7 +424,7 @@ def test_tensors_can_be_rewritten(free_alg):
     z = IndexedBase('z')
 
     tensor = dr.einst(
-        x[a] * v[a] + o[a, b] * y[b] * v[a]  # Terms to rewrite.
+        x[a] * v[a] + o[a, b] * y[b] * v[a] + z[b] * v[b]  # Terms to rewrite.
         + z[a, b] * v[a] * v[b]  # Terms to keep.
     )
 
@@ -421,10 +432,14 @@ def test_tensors_can_be_rewritten(free_alg):
     r = IndexedBase('r')
     rewritten, defs = tensor.rewrite(v[w], r[w])
 
-    assert rewritten == dr.einst(z[a, b] * v[a] * v[b] + r[a] * v[a])
-    assert len(defs) == 1
+    assert rewritten == dr.einst(
+        z[a, b] * v[a] * v[b] + r[a] * v[a] + r[b] * v[b]
+    )
+    assert len(defs) == 2
     assert r[a] in defs
     assert defs[r[a]] == dr.einst(x[a] + o[a, b] * y[b])
+    assert r[b] in defs
+    assert defs[r[b]] == dr.sum(z[b])
 
 
 def test_tensor_method(free_alg):

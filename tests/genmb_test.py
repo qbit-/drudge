@@ -19,7 +19,7 @@ def test_genmb_has_basic_properties(genmb):
     dr = genmb
 
     assert len(dr.orb_ranges) == 1
-    assert len(dr.spin_vals) == 0
+    assert dr.spin_vals is None
 
     assert dr.one_body == dr.names.t == IndexedBase('t')
     assert dr.two_body == dr.names.u == IndexedBase('u')
@@ -92,7 +92,7 @@ def test_genmb_derives_spin_orbit_hartree_fock(genmb):
 
     rot = c_dag[a] * c_[b]
     comm = (dr.ham | rot).simplify()
-    assert comm.n_terms == 6
+    assert comm.n_terms == 4
 
     rho = IndexedBase('rho')
     # Following Ring and Schuck, here all creation comes before the

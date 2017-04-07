@@ -192,20 +192,34 @@ class EnumSymbs(AtomicExpr, metaclass=_EnumSymbsMeta):
         """Test two values for greater than."""
         return self.args > other.args
 
-    def __sub__(self, other):
+    def __sub__(self, other: Expr):
         """Subtract the current value with another.
 
         This method is mainly to be able to work together with the Kronecker
-        delta class from SymPy.
+        delta class from SymPy.  The difference is only guaranteed to have
+        correct ``is_zero`` property.  The actual difference might not make
+        mathematical sense.
         """
 
-        if not isinstance(other, type(self)):
+        if isinstance(other, type(self)):
+            return self.args[0] - other.args[0]
+        elif len(other.atoms(Symbol)) == 0:
             raise ValueError(
                 'Invalid operation for ', (self, other),
                 'concrete symbols can only be subtracted for the same type'
             )
+        else:
+            # We are having a symbolic value at the other expression.  We just
+            # need to make sure that the result is fuzzy.
+            assert other.is_zero is None
+            return other
 
-        return self.args[0] - other.args[0]
+    def __rsub__(self, other):
+        """Subtract the current value from the other expression.
+
+        Only the ``is_zero`` property is guaranteed.
+        """
+        return self.__sub__(other)
 
     def sort_key(self, order=None):
         return (
@@ -410,17 +424,28 @@ class Stopwatch:
 
         """
         self._print = print_cb
-        self.tick()
+        self.tick(total=True)
 
-    def tick(self):
-        """Reset the timer."""
+    def tick(self, total=False):
+        """Reset the timer.
+
+        Parameters
+        ----------
+
+        total
+            If the total beginning time is going to be reset as well.
+
+        """
         self._prev = time.time()
+        if total:
+            self._begin = self._prev
 
     def tock(self, label, tensor=None):
         """Make a timestamp.
 
         The formatted timestamp will be given to the callback of the current
-        stamper.
+        stamper.  The wall time elapsed since the last :py:meth:`tick` will be
+        printed.
 
         Parameters
         ----------
@@ -448,4 +473,16 @@ class Stopwatch:
 
         self._print(
             '{} done, {}wall time: {:.2f} s'.format(label, n_terms, elapse)
+        )
+
+    def tock_total(self):
+        """Make a timestamp for the total time.
+
+        The total time will be the time elapsed since the **total** time was
+        last reset.
+        """
+
+        now = time.time()
+        self._print(
+            'Total wall time: {:.2f} s'.format(now - self._begin)
         )

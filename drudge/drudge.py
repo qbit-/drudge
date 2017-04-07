@@ -449,6 +449,21 @@ class Tensor:
             lambda x: x.simplify_deltas(resolvers.value)
         ).filter(_is_nonzero)
 
+    def simplify_sums(self):
+        """Simplify the summations in the tensor.
+
+        Currently, only bounded summations with dummies not involved in the term
+        will be replaced by a multiplication with its size.
+        """
+
+        return self.apply(self._simplify_sums)
+
+    @staticmethod
+    def _simplify_sums(terms: RDD):
+        """Simplify the summations in the given terms."""
+
+        return terms.map(lambda x: x.simplify_sums())
+
     def expand(self):
         """Expand the terms in the tensor.
 
@@ -586,6 +601,7 @@ class Tensor:
         if self._drudge.full_simplify:
             terms = self._simplify_amps(terms)
         terms = self._simplify_deltas(terms, False)
+        terms = self._simplify_sums(terms)
 
         # Canonicalize the terms and see if they can be merged.
         terms = self._canon(terms, True)
@@ -758,7 +774,7 @@ class Tensor:
                 prod = self._terms.flatMap(lambda term: [
                     (i, term) if right else (term, i)
                     for i in other_terms
-                    ])
+                ])
             else:
                 # Special optimization when we just have one term.
                 other_term = other_terms[0]
@@ -769,7 +785,7 @@ class Tensor:
 
             free_vars = set.union(*[
                 i.free_vars for i in other_terms
-                ])
+            ])
             free_vars |= self.free_vars
             expanded = False
 
@@ -879,7 +895,7 @@ class Tensor:
                 wilds = {
                     i: Wild(i.name) for i in lhs.indices if
                     isinstance(i, Symbol)
-                    }
+                }
             else:
                 wilds = {}
 
@@ -1016,7 +1032,7 @@ class Tensor:
         ).cache()
         new_terms = [
             i for i in rewritten.countByKey().keys() if i is not None
-            ]
+        ]
 
         get_term = operator.itemgetter(1)
         untouched_terms = rewritten.filter(
@@ -1025,6 +1041,9 @@ class Tensor:
         new_defs = {}
         for i in new_terms:
             def_terms = rewritten.filter(lambda x: x[0] == i).map(get_term)
+            # Eagerly evaluate to circumvent a Spark bug.
+            def_terms.cache()
+            def_terms.count()
             new_defs[i.amp] = Tensor(self._drudge, def_terms)
             continue
 
@@ -1209,6 +1228,24 @@ class TensorDef:
         this initializer is also unlikely to be used directly in user code.
         Drudge methods :py:meth:`Drudge.define` and
         :py:meth:`Drudge.define_einst` can be more convenient.
+
+        Parameters
+        ----------
+
+        base
+            The base for the definition.  It should be a :py:class:`Vec`
+            instance for tensors with vector part.  Or it should be SymPy
+            IndexedBase or Symbol instance for scalar tensors, depending on the
+            presence or absence of external indices.
+
+        exts
+            The iterable for external indices.  They can be either symbol/range
+            pairs for external indices with explicit range, or they can also be
+            a plain symbol for generic definitions.
+
+        tensor
+            The RHS of the definition.
+
         """
 
         if isinstance(base, Vec):
@@ -1233,16 +1270,20 @@ class TensorDef:
 
         self._exts = []
         for i in exts:
-            valid_ext = (
+            explicit_ext = (
                 isinstance(i, Sequence) and len(i) == 2 and
                 isinstance(i[0], Symbol) and isinstance(i[1], Range)
             )
-            if valid_ext:
+            if explicit_ext:
                 self._exts.append(tuple(i))
+            elif isinstance(i, Symbol):
+                self._exts.append((
+                    i, None
+                ))
             else:
                 raise TypeError(
                     'Invalid external index', i,
-                    'expecting dummy and range pair'
+                    'expecting dummy/range pair or a dummy.'
                 )
             continue
 
